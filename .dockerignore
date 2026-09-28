@@ -1,0 +1,13 @@
+data/
+.git/
+.venv/
+__pycache__/
+*.pyc
+*.db
+.env
+config_instance1.yaml
+*.apk
+tests/
+scripts/
+docs/
+README.md

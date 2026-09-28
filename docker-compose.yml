@@ -1,0 +1,58 @@
+
+networks:
+  lineflow_net:
+    driver: bridge
+
+services:
+  # ==========================================
+  # LINE Instance 1 (Redroid 模擬器)
+  # ==========================================
+  redroid_line1:
+    image: redroid/redroid:11.0.0-latest
+    container_name: redroid_line1
+    restart: unless-stopped
+    privileged: true
+    networks:
+      - lineflow_net
+    ports:
+      # Bind ADB port to loopback only — prevents LAN access to the emulator
+      - "127.0.0.1:5555:5555"
+    volumes:
+      - ./data/instance1:/data
+      - /dev/binderfs:/dev/binderfs
+    command:
+      - androidboot.use_memfd=1
+      - androidboot.redroid_width=720
+      - androidboot.redroid_height=1280
+      - androidboot.redroid_dpi=320
+      - ro.product.cpu.abilist=x86_64,arm64-v8a,x86,armeabi-v7a,armeabi
+
+  # ==========================================
+  # LINEFLOW Gateway Server (FastAPI + UIAutomator)
+  # Port 8000 只綁定 loopback — 只有同機的 Caddy 可以連，外網不可直接存取
+  # ==========================================
+  lineflow_server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lineflow_server
+    restart: unless-stopped
+    depends_on:
+      - redroid_line1
+    networks:
+      - lineflow_net
+    ports:
+      - "127.0.0.1:8000:8000"  # 僅本機 Caddy 可連，外網無法直接存取
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env  # Contains LINEFLOW_AUTH_TOKEN and other secrets — never commit this file
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # 注意：nginx 和 certbot container 已移除。
+  # TLS 終結由已在 host 上運行的 Caddy 負責。
+  # 請在 /etc/caddy/Caddyfile 加入 /ws/* 路由即可。

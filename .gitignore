@@ -1,0 +1,33 @@
+# 敏感資訊與個人設定
+.env
+.env.*
+!.env.example
+config_*.yaml
+*.pem
+*.key
+
+# 執行階段資料庫與模擬器持久化資料
+data/
+*.db
+*.sqlite3
+
+# 大型二進位檔
+*.apk
+*.tar.gz
+
+# Python 暫存檔與快取
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# IDE / 系統快取
+.DS_Store
+.vscode/
+.idea/
+*.log
