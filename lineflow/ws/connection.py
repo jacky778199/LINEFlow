@@ -44,12 +44,16 @@ class ConnectionManager:
             "type": "new_message",
             "data": message
         }
+        await self.broadcast_event(payload, instance_id)
+
+    async def broadcast_event(self, payload: dict, instance_id: str):
         text = json.dumps(payload, ensure_ascii=False)
         async with self._lock:
             sockets = list(self.active_connections.get(instance_id, []))
 
-        for ws in sockets:
+        async def send(ws):
             try:
-                await ws.send_text(text)
+                await asyncio.wait_for(ws.send_text(text), timeout=2)
             except Exception as e:
                 logger.warning(f"Error broadcasting to socket: {e}")
+        await asyncio.gather(*(send(ws) for ws in sockets))

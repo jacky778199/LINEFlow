@@ -1,7 +1,8 @@
+import io
 import logging
 import subprocess
 import time
-from typing import Optional
+from typing import Optional, Tuple
 import uiautomator2 as u2
 
 logger = logging.getLogger("lineflow.adb.device")
@@ -92,31 +93,62 @@ class AndroidDeviceManager:
         except Exception as e:
             logger.error(f"Error restarting app: {e}")
 
-    def safe_back_to_main(self, max_tries: int = 5):
-        """安全返回主畫面，一旦到達 MainActivity 即停止按 Back，絕對不退出 App 到桌面"""
+    def safe_back_to_main(self, max_tries: int = 5) -> bool:
+        """Return only after verifying the Chats tab and main search bar."""
         if not self.d:
-            return
-        for _ in range(max_tries):
+            return False
+        for attempt in range(max_tries + 1):
             try:
                 curr = self.d.app_current()
-                pkg = curr.get("package", "")
-                act = curr.get("activity", "")
-                # 若已經在 MainActivity，停止按 Back 避免跳出桌面
-                if pkg == self.package_name and "MainActivity" in act:
+                if curr.get("package") != self.package_name:
+                    return False
+                tabs = self.d(resourceId=self.package_name + ":id/bnb_button_clickable_area",
+                              descriptionMatches="(?i)(Chats|聊天|トーク).*" )
+                if tabs.exists:
+                    tabs.click()
+                    time.sleep(.3)
+                    if (self.d(resourceId=self.package_name + ":id/main_tab_search_bar").exists
+                            and not self.d(resourceIdMatches=".*(chat_ui_message_edit|chathistory_message_edit).*").exists):
+                        return True
+                    return False
+                if attempt == max_tries:
                     break
                 self.d.press("back")
                 time.sleep(0.5)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to return to Chats: %s", exc)
                 break
-
-        # 確保回到聊天列表標籤頁 (Chats Tab)
-        try:
-            chats_tab = self.d(descriptionMatches="(?i)chats|聊天|トーク")
-            if chats_tab.exists(timeout=0.5):
-                chats_tab.click()
-        except Exception:
-            pass
+        logger.warning("Could not verify Chats page after %d back attempts", max_tries)
+        return False
 
     def press_back(self, times: int = 1):
         """安全按返回鍵 (若已在 MainActivity 則自動忽略，防止跳出 App)"""
         self.safe_back_to_main(max_tries=times)
+
+    def take_screenshot(self, format: str = "jpeg", quality: int = 80) -> Tuple[Optional[bytes], Optional[Tuple[int, int]], Optional[str]]:
+        """
+        截取目前裝置螢幕畫面 (不改變或干擾目前 UI 狀態)
+        :param format: "jpeg" 或 "png" (預設 "jpeg")
+        :param quality: JPEG 圖片品質 1-100 (預設 80，僅在 format="jpeg" 時生效)
+        :return: (image_bytes, (width, height), error_message)
+        """
+        if not self.ensure_connected():
+            return None, None, f"Device {self.serial} is not connected"
+        if not self.d:
+            return None, None, f"Device connection to {self.serial} is not initialized"
+
+        try:
+            img = self.d.screenshot()
+            width, height = img.size
+            buf = io.BytesIO()
+            fmt = "PNG" if format.lower() == "png" else "JPEG"
+            if fmt == "JPEG":
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                img.save(buf, format=fmt, quality=max(1, min(quality, 100)))
+            else:
+                img.save(buf, format=fmt)
+            return buf.getvalue(), (width, height), None
+        except Exception as e:
+            logger.error(f"Error taking screenshot on {self.serial}: {e}")
+            return None, None, str(e)

@@ -2,8 +2,10 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 import os
+import base64
+import hmac
 from typing import Dict, List, Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query, Header
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -57,7 +59,8 @@ for inst_id, inst_cfg in config.instances.items():
             instance_id=inst_id,
             config=inst_cfg,
             repository=repository,
-            on_new_message=make_on_new_message(inst_id)
+            on_new_message=make_on_new_message(inst_id),
+            on_sync_event=lambda event, instance=inst_id: connection_manager.broadcast_event(event, instance)
         )
 
 @asynccontextmanager
@@ -102,16 +105,81 @@ app.add_middleware(HttpOnlyCORSMiddleware)
 
 # 掛載健康檢查端點
 @app.get("/health")
-def health_check():
+async def health_check():
+    from fastapi.responses import JSONResponse
+    instances = {}
+    for inst_id, engine in engines.items():
+        try:
+            alive = await asyncio.wait_for(asyncio.to_thread(engine.device_mgr.is_alive), 3)
+        except Exception:
+            alive = False
+        groups = engine.sync_status.snapshot()
+        monitor_alive = bool(engine._monitor_task and not engine._monitor_task.done())
+        poll_alive = bool(engine._poll_task and not engine._poll_task.done())
+        healthy = alive and monitor_alive and poll_alive and all(g["effective_level"] == "ok" for g in groups)
+        # Detailed group names/reasons are available only through authenticated WS.
+        instances[inst_id] = dict(alive=alive, serial=engine.config.adb_serial,
+            healthy=healthy, monitor_alive=monitor_alive, poll_alive=poll_alive,
+            group_count=len(groups), warning_groups=sum(g["effective_level"] == "warning" for g in groups),
+            critical_groups=sum(g["effective_level"] == "critical" for g in groups),
+            pending_groups=sum(g["last_complete_at"] is None for g in groups))
+    healthy = all(i["healthy"] for i in instances.values())
+    return JSONResponse({"status": "ok" if healthy else "degraded", "instances": instances},
+                        status_code=200 if healthy else 503)
+
+# 取得目前畫面截圖端點 (HTTP REST)
+@app.get("/instances/{instance_id}/screenshot")
+async def get_instance_screenshot(
+    instance_id: str,
+    token: Optional[str] = Query(None, description="Auth token via query parameter"),
+    authorization: Optional[str] = Header(None, description="Bearer token"),
+    x_auth_token: Optional[str] = Header(None, description="Auth token via custom header"),
+    format: str = Query("jpeg", description="Image format: jpeg or png"),
+    quality: int = Query(80, ge=1, le=100, description="JPEG quality 1-100"),
+    raw: bool = Query(True, description="Return raw image bytes directly if true; JSON with base64 if false")
+):
+    """取得特定 instance 模擬器的目前螢幕畫面截圖"""
+    provided_token = ""
+    if token:
+        provided_token = token
+    elif x_auth_token:
+        provided_token = x_auth_token
+    elif authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            provided_token = parts[1]
+        else:
+            provided_token = authorization
+
+    if not config.server.auth_token or not hmac.compare_digest(provided_token, config.server.auth_token):
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid or missing auth token")
+
+    engine = engines.get(instance_id)
+    if not engine:
+        raise HTTPException(status_code=404, detail=f"Instance '{instance_id}' not found")
+
+    fmt = format.lower()
+    if fmt not in ("jpeg", "png"):
+        fmt = "jpeg"
+
+    img_bytes, size, err = await engine.take_screenshot(format=fmt, quality=quality)
+    if not img_bytes or not size:
+        raise HTTPException(status_code=500, detail=f"Failed to capture screenshot: {err or 'unknown error'}")
+
+    mime_type = "image/jpeg" if fmt == "jpeg" else "image/png"
+    if raw:
+        return Response(content=img_bytes, media_type=mime_type)
+
+    b64_str = base64.b64encode(img_bytes).decode("ascii")
     return {
-        "status": "ok",
-        "instances": {
-            inst_id: {
-                "alive": engine.device_mgr.is_alive(),
-                "serial": engine.config.adb_serial
-            }
-            for inst_id, engine in engines.items()
-        }
+        "status": "success",
+        "instance_id": instance_id,
+        "format": fmt,
+        "width": size[0],
+        "height": size[1],
+        "size_bytes": len(img_bytes),
+        "image_base64": b64_str,
+        "data_uri": f"data:{mime_type};base64,{b64_str}"
     }
 
 # 掛載 WebSocket 路由

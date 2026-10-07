@@ -10,10 +10,14 @@ LineFlow 模擬客戶端 (Test Client)
 
 import argparse
 import asyncio
+import base64
 import json
 import sys
+import time
 import uuid
 import websockets
+
+pending_screenshot_paths = {}
 
 def print_banner():
     print("=" * 60)
@@ -52,6 +56,28 @@ async def listen_messages(ws):
                         print(f"\n❌ [發送回執] 請求 {req_id} 發送失敗: {err}")
                     print("Prompt > ", end="", flush=True)
 
+                elif msg_type == "screenshot_result":
+                    req_id = data.get("request_id")
+                    status = data.get("status")
+                    if status == "success":
+                        width = data.get("width")
+                        height = data.get("height")
+                        fmt = data.get("format", "jpeg")
+                        b64_data = data.get("image_base64")
+                        out_path = pending_screenshot_paths.pop(req_id, None) or f"screenshot_{int(time.time())}.{fmt}"
+                        if b64_data:
+                            img_raw = base64.b64decode(b64_data)
+                            with open(out_path, "wb") as f:
+                                f.write(img_raw)
+                            print(f"\n📸 [截圖回傳] 請求 {req_id} 成功！尺寸: {width}x{height} | 大小: {len(img_raw)} bytes")
+                            print(f"   已儲存至: {out_path}")
+                        else:
+                            print(f"\n📸 [截圖回傳] 請求 {req_id} 成功，但未帶有影像資料")
+                    else:
+                        err = data.get("error_message")
+                        print(f"\n❌ [截圖失敗] 請求 {req_id} 失敗: {err}")
+                    print("Prompt > ", end="", flush=True)
+
                 elif msg_type == "pong":
                     print("\n🏓 [Pong] 收到心跳回應")
                     print("Prompt > ", end="", flush=True)
@@ -71,8 +97,9 @@ async def interactive_loop(ws):
     print("\n可輸入的指令：")
     print("  1) sync <seq_id>             - 請求補償大於 seq_id 的訊息 (例: sync 0)")
     print("  2) send <target> <message>   - 測試發送文字至目標聊天室 (例: send 王小明 測試訊息)")
-    print("  3) ping                      - 發送心跳測試")
-    print("  4) exit                      - 退出模擬客戶端\n")
+    print("  3) screen [filename]         - 截取目前 LINE 畫面並存檔 (例: screen 或 screen shot.jpg)")
+    print("  4) ping                      - 發送心跳測試")
+    print("  5) exit                      - 退出模擬客戶端\n")
 
     while True:
         try:
@@ -109,6 +136,19 @@ async def interactive_loop(ws):
                     "message": message
                 }
                 print(f"📤 發送指令下發中... [request_id={req_id}]")
+                await ws.send(json.dumps(payload))
+            elif cmd in ("screen", "screenshot"):
+                filename = parts[1] if len(parts) > 1 else None
+                req_id = f"req-{uuid.uuid4().hex[:8]}"
+                if filename:
+                    pending_screenshot_paths[req_id] = filename
+                payload = {
+                    "action": "screenshot",
+                    "request_id": req_id,
+                    "format": "jpeg",
+                    "quality": 80
+                }
+                print(f"📸 截圖請求下發中... [request_id={req_id}]")
                 await ws.send(json.dumps(payload))
             else:
                 print(f"⚠️ 未知指令: {cmd}")
